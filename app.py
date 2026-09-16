@@ -79,13 +79,18 @@ if 'train_df' not in st.session_state or 'test_df' not in st.session_state:
     st.session_state['test_df'] = test_df
 
 # [안전장치 2] 기본 베이스라인 모델 사전 적합 (메뉴 3, 4로 바로 진입 시 NameError 방지)
+# ★ Colab과 동일하게 Gender(채용 공정성 저해/거리 왜곡 변수)를 독립변수에서 제외
 if 'best_model' not in st.session_state:
     base_train = st.session_state['train_df']
     base_test = st.session_state['test_df']
     
-    X_tr = base_train.drop(columns=['EmpID', 'AftEval'])
+    drop_cols = ['EmpID', 'AftEval']
+    if 'Gender' in base_train.columns:
+        drop_cols.append('Gender')
+
+    X_tr = base_train.drop(columns=drop_cols)
     y_tr = base_train['AftEval']
-    X_te = base_test.drop(columns=['EmpID', 'AftEval'])
+    X_te = base_test.drop(columns=drop_cols)
     y_te = base_test['AftEval']
 
     default_pipe = Pipeline([
@@ -113,7 +118,7 @@ st.sidebar.info(f"""
 **💡 모델 배경 정보**
 - **모집단**: 입사 1년 차 재직자 {len(df):,}명
 - **Target**: AftEval (1: 고성과자, 0: 저성과자)
-- **전형 지표**: 면접, 코딩테스트, 인성검사, 경력, 성별
+- **전형 지표**: 면접, 코딩테스트, 인성검사, 경력 (공정성을 위해 성별 제외)
 """)
 
 
@@ -129,11 +134,14 @@ if menu == "1. 데이터 탐색 및 EDA":
     low_perf_count = int((df['AftEval'] == 0).sum())
     high_perf_ratio = (high_perf_count / total_count) * 100
 
+    # Gender와 EmpID를 제외한 실제 모델 독립변수 개수 표기
+    feature_count = len([c for c in df.columns if c not in ['EmpID', 'AftEval', 'Gender']])
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("전체 지원자 수", f"{total_count:,} 명")
     col2.metric("우수 고성과자 (1)", f"{high_perf_count:,} 명", f"{high_perf_ratio:.1f}%")
     col3.metric("일반/저성과자 (0)", f"{low_perf_count:,} 명", f"{100 - high_perf_ratio:.1f}%")
-    col4.metric("전형 독립변수", f"{len(df.columns) - 2} 개", "EmpID 제외")
+    col4.metric("전형 독립변수", f"{feature_count} 개", "EmpID·Gender 제외")
 
     st.markdown("---")
 
@@ -190,7 +198,7 @@ if menu == "1. 데이터 탐색 및 EDA":
 
     with tab3:
         st.subheader("전형 요소 및 성과 간 상관분석")
-        corr_df = df.drop(columns=['EmpID']).corr().round(3)
+        corr_df = df.drop(columns=[c for c in ['EmpID'] if c in df.columns]).corr().round(3)
         fig_corr = px.imshow(
             corr_df, text_auto=True, aspect="auto",
             color_continuous_scale='RdBu_r',
@@ -209,9 +217,14 @@ elif menu == "2. kNN 모델 튜닝 및 학습":
     train_df = st.session_state['train_df']
     test_df = st.session_state['test_df']
 
-    X_train = train_df.drop(columns=['EmpID', 'AftEval'])
+    # ★ Gender 배제
+    drop_cols = ['EmpID', 'AftEval']
+    if 'Gender' in train_df.columns:
+        drop_cols.append('Gender')
+
+    X_train = train_df.drop(columns=drop_cols)
     y_train = train_df['AftEval']
-    X_test = test_df.drop(columns=['EmpID', 'AftEval'])
+    X_test = test_df.drop(columns=drop_cols)
     y_test = test_df['AftEval']
 
     col_left, col_right = st.columns([1, 2])
@@ -390,10 +403,7 @@ elif menu == "4. 실시간 신규 지원자 성과 예측":
         with st.form("applicant_form"):
             cand_name = st.text_input("지원자 성명 / 식별코드", "김인재 (CAND-001)")
             
-            # 교안 기준 성별 매핑 적용 (0: 남성, 1: 여성)
-            gender_label = st.radio("성별", ["남성 (0)", "여성 (1)"], horizontal=True)
-            gender_val = 0 if "남성" in gender_label else 1
-
+            # ★ 채용 공정성 확보를 위해 성별(Gender) 입력 필드 완전 제거
             exp_val = st.select_slider("이전 직장 경력 연차", options=[0, 1, 2], value=1, format_func=lambda x: f"{x}년차")
             interview_val = st.slider("면접 전형 성적 (InterviewScore)", min_value=40, max_value=100, value=85, step=1)
             skill_val = st.slider("코딩 / 기술 테스트 성적 (SkillScore)", min_value=40, max_value=100, value=90, step=1)
@@ -404,8 +414,8 @@ elif menu == "4. 실시간 신규 지원자 성과 예측":
     with col_result:
         st.subheader("📊 예측 결과 및 리포트")
         if submit_btn:
+            # ★ 모델 학습 피처와 동일하게 Gender 없이 4개 변수로 생성
             new_cand = pd.DataFrame([{
-                'Gender': gender_val,
                 'PreviousExperience': exp_val,
                 'InterviewScore': interview_val,
                 'SkillScore': skill_val,
