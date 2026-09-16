@@ -275,7 +275,10 @@ elif menu == "3. 모델 평가 및 채용 오차 분석":
     if 'best_model' not in st.session_state:
         X = df.drop(columns=['EmpID', 'AftEval'])
         y = df['AftEval']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+        if 'train_df' not in st.session_state:
+            train_df, test_df = train_test_split(df, test_size=0.2, stratify=df['AftEval'], random_state=42)
+            st.session_state['train_df'] = train_df
+            st.session_state['test_df'] = test_df
         pipe = Pipeline([
             ('scaler', StandardScaler()),
             ('knn', KNeighborsClassifier(n_neighbors=15, weights='distance', metric='euclidean'))
@@ -441,7 +444,8 @@ elif menu == "4. 실시간 신규 지원자 성과 예측":
 
             new_scaled = scaler.transform(new_cand)
             distances, indices = knn_model.kneighbors(new_scaled, n_neighbors=5)
-            neighbors_df = df.iloc[indices[0]].copy()
+            train_df = st.session_state['train_df']
+            neighbors_df = train_df.iloc[indices[0]].copy()
             neighbors_df['유사도 거리'] = distances[0].round(3)
             neighbors_df['1년 후 실제 성과'] = neighbors_df['AftEval'].apply(lambda x: '고성과자 (1)' if x == 1 else '저성과자 (0)')
 
