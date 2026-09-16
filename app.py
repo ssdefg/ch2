@@ -61,7 +61,7 @@ def load_dataset(file_source=None):
 # 3. 사이드바 구성 및 메뉴 내비게이션
 # ------------------------------------------------------------------------------
 st.sidebar.image("https://img.icons8.com/color/96/000000/conference-call.png", width=70)
-st.sidebar.title("ch2.knn 프로젝트")
+st.sidebar.title("KNN PROJECT")
 st.sidebar.caption("M사 채용 전형 kNN 예측 모델링")
 st.sidebar.markdown("---")
 
