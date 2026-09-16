@@ -72,6 +72,32 @@ if df is None:
     st.error("데이터셋('ch2_knn.csv')을 찾을 수 없습니다. GitHub 저장소에 csv 파일을 올리거나, 사이드바에서 파일을 직접 업로드해주세요.")
     st.stop()
 
+# [안전장치 1] 앱 시작 시 훈련/테스트 데이터셋을 즉시 일괄 분할 및 세션 보관 (KeyError 원천 차단)
+if 'train_df' not in st.session_state or 'test_df' not in st.session_state:
+    train_df, test_df = train_test_split(df, test_size=0.2, stratify=df['AftEval'], random_state=42)
+    st.session_state['train_df'] = train_df
+    st.session_state['test_df'] = test_df
+
+# [안전장치 2] 기본 베이스라인 모델 사전 적합 (메뉴 3, 4로 바로 진입 시 NameError 방지)
+if 'best_model' not in st.session_state:
+    base_train = st.session_state['train_df']
+    base_test = st.session_state['test_df']
+    
+    X_tr = base_train.drop(columns=['EmpID', 'AftEval'])
+    y_tr = base_train['AftEval']
+    X_te = base_test.drop(columns=['EmpID', 'AftEval'])
+    y_te = base_test['AftEval']
+
+    default_pipe = Pipeline([
+        ('scaler', StandardScaler()),
+        ('knn', KNeighborsClassifier(n_neighbors=15, weights='distance', metric='euclidean'))
+    ])
+    default_pipe.fit(X_tr, y_tr)
+    st.session_state['best_model'] = default_pipe
+    st.session_state['X_test'] = X_te
+    st.session_state['y_test'] = y_te
+    st.session_state['cv_score'] = 0.0
+
 menu = st.sidebar.radio(
     "📌 대시보드 메뉴 이동",
     [
@@ -83,9 +109,9 @@ menu = st.sidebar.radio(
 )
 
 st.sidebar.markdown("---")
-st.sidebar.info("""
+st.sidebar.info(f"""
 **💡 모델 배경 정보**
-- **모집단**: 입사 1년 차 재직자 1,147명
+- **모집단**: 입사 1년 차 재직자 {len(df):,}명
 - **Target**: AftEval (1: 고성과자, 0: 저성과자)
 - **전형 지표**: 면접, 코딩테스트, 인성검사, 경력, 성별
 """)
@@ -180,8 +206,13 @@ elif menu == "2. kNN 모델 튜닝 및 학습":
     st.markdown('<div class="main-header">⚙️ kNN 모델 구성 및 교차검증 튜닝</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">StandardScaler와 KNeighborsClassifier를 파이프라인으로 묶어 데이터 누수 없이 최적 파라미터를 탐색합니다.</div>', unsafe_allow_html=True)
 
-    X = df.drop(columns=['EmpID', 'AftEval'])
-    y = df['AftEval']
+    train_df = st.session_state['train_df']
+    test_df = st.session_state['test_df']
+
+    X_train = train_df.drop(columns=['EmpID', 'AftEval'])
+    y_train = train_df['AftEval']
+    X_test = test_df.drop(columns=['EmpID', 'AftEval'])
+    y_test = test_df['AftEval']
 
     col_left, col_right = st.columns([1, 2])
 
@@ -202,9 +233,6 @@ elif menu == "2. kNN 모델 튜닝 및 학습":
 
     with col_right:
         st.subheader("📈 학습 및 교차검증 결과")
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, stratify=y, random_state=42
-        )
 
         if run_btn:
             with st.spinner("교차검증을 수행하는 중입니다..."):
@@ -259,7 +287,7 @@ elif menu == "2. kNN 모델 튜닝 및 학습":
                     st.success("✅ 수동 설정 모델 학습 완료!")
                     st.write(f"- 5-Fold 평균 CV 정확도: **{scores.mean()*100:.2f}%** (±{scores.std()*100:.2f}%)")
         else:
-            if 'best_model' in st.session_state:
+            if 'best_model' in st.session_state and st.session_state['cv_score'] > 0:
                 st.info(f"학습된 모델이 세션에 유지되고 있습니다. (CV 정확도: {st.session_state['cv_score']*100:.2f}%)")
             else:
                 st.info("왼쪽 패널에서 학습 모드를 선택하고 버튼을 클릭해주세요.")
@@ -271,22 +299,6 @@ elif menu == "2. kNN 모델 튜닝 및 학습":
 elif menu == "3. 모델 평가 및 채용 오차 분석":
     st.markdown('<div class="main-header">📊 모델 성능 평가 및 HR 리스크 분석</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">테스트 데이터셋을 바탕으로 정확도, 혼동행렬, 그리고 채용 1종/2종 오차 비용을 분석합니다.</div>', unsafe_allow_html=True)
-
-    if 'best_model' not in st.session_state:
-        X = df.drop(columns=['EmpID', 'AftEval'])
-        y = df['AftEval']
-        if 'train_df' not in st.session_state:
-            train_df, test_df = train_test_split(df, test_size=0.2, stratify=df['AftEval'], random_state=42)
-            st.session_state['train_df'] = train_df
-            st.session_state['test_df'] = test_df
-        pipe = Pipeline([
-            ('scaler', StandardScaler()),
-            ('knn', KNeighborsClassifier(n_neighbors=15, weights='distance', metric='euclidean'))
-        ])
-        pipe.fit(X_train, y_train)
-        st.session_state['best_model'] = pipe
-        st.session_state['X_test'] = X_test
-        st.session_state['y_test'] = y_test
 
     model = st.session_state['best_model']
     X_test = st.session_state['X_test']
@@ -368,18 +380,8 @@ elif menu == "4. 실시간 신규 지원자 성과 예측":
     st.markdown('<div class="main-header">🎯 신규 지원자 성과 예측 시뮬레이터</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">지원자의 전형 점수를 입력해 1년 후 성과 확률을 산출하고, kNN 기반의 가장 유사한 과거 입사자 5명을 즉시 대조합니다.</div>', unsafe_allow_html=True)
 
-    if 'best_model' not in st.session_state:
-        X = df.drop(columns=['EmpID', 'AftEval'])
-        y = df['AftEval']
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
-        pipe = Pipeline([
-            ('scaler', StandardScaler()),
-            ('knn', KNeighborsClassifier(n_neighbors=15, weights='distance', metric='euclidean'))
-        ])
-        pipe.fit(X_train, y_train)
-        st.session_state['best_model'] = pipe
-
     model = st.session_state['best_model']
+    train_df = st.session_state['train_df']
 
     col_input, col_result = st.columns([1, 1])
 
@@ -387,8 +389,10 @@ elif menu == "4. 실시간 신규 지원자 성과 예측":
         st.subheader("📝 지원자 프로필 및 전형 점수 입력")
         with st.form("applicant_form"):
             cand_name = st.text_input("지원자 성명 / 식별코드", "김인재 (CAND-001)")
-            gender_label = st.radio("성별", ["여성 (0)", "남성 (1)"], horizontal=True)
-            gender_val = 1 if "남성" in gender_label else 0
+            
+            # 교안 기준 성별 매핑 적용 (0: 남성, 1: 여성)
+            gender_label = st.radio("성별", ["남성 (0)", "여성 (1)"], horizontal=True)
+            gender_val = 0 if "남성" in gender_label else 1
 
             exp_val = st.select_slider("이전 직장 경력 연차", options=[0, 1, 2], value=1, format_func=lambda x: f"{x}년차")
             interview_val = st.slider("면접 전형 성적 (InterviewScore)", min_value=40, max_value=100, value=85, step=1)
@@ -444,10 +448,8 @@ elif menu == "4. 실시간 신규 지원자 성과 예측":
 
             new_scaled = scaler.transform(new_cand)
             distances, indices = knn_model.kneighbors(new_scaled, n_neighbors=5)
-            if 'train_df' not in st.session_state:
-                train_df, _ = train_test_split(df, test_size=0.2, stratify=df['AftEval'], random_state=42)
-                st.session_state['train_df'] = train_df
-            train_df = st.session_state['train_df']
+            
+            # 모델이 실제 학습한 train_df에서 iloc로 정확히 참조
             neighbors_df = train_df.iloc[indices[0]].copy()
             neighbors_df['유사도 거리'] = distances[0].round(3)
             neighbors_df['1년 후 실제 성과'] = neighbors_df['AftEval'].apply(lambda x: '고성과자 (1)' if x == 1 else '저성과자 (0)')
