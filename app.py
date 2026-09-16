@@ -1,283 +1,108 @@
-# ==============================================================================
-# [HR Analytics] kNN 분류 모델 기반 입사 1년 후 성과(AftEval) 예측 종합 실습 파이프라인
-# ==============================================================================
-# - 분석 목적: M사 채용 전형 점수(면접, 코딩, 인성)를 바탕으로 1년 후 고성과자(1) 조기 예측
-# - 모델 기법: StandardScaler + KNeighborsClassifier (Pipeline & 5-Fold GridSearchCV)
-# - 주요 특징: 데이터 누수(Data Leakage) 원천 차단, 채용 오차(FP/FN) 비즈니스 해석, 신규자 추론
-# ==============================================================================
-
-import io
-import os
-import warnings
-warnings.filterwarnings('ignore')
-
-import matplotlib.pyplot as plt
-import numpy as np
+import streamlit as st
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 import seaborn as sns
 
-# Scikit-learn 모델, 전처리 및 평가 도구
-from sklearn.model_selection import GridSearchCV, StratifiedKFold, train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import (
-    accuracy_score, classification_report, confusion_matrix,
-    f1_score, precision_score, recall_score, roc_auc_score, roc_curve
-)
+from sklearn.metrics import confusion_matrix, roc_curve, roc_auc_score, accuracy_score, f1_score
 
-# 시각화 기본 설정
-sns.set_theme(style="whitegrid")
-plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial']
-plt.rcParams['axes.unicode_minus'] = False
+st.set_page_config(page_title="HR Analytics 대시보드", layout="wide")
+st.title("👥 HR Analytics: kNN 기반 고성과자 예측 대시보드")
 
+# 1. 데이터 로드
+DATA_PATH = 'ch2_knn.csv'
 
-# ==============================================================================
-# 1. 데이터 로드 및 탐색적 기초 통계
-# ==============================================================================
-print("=" * 75)
-print("1. 데이터셋 로드 및 기초 구조 확인")
-print("=" * 75)
+@st.cache_data
+def load_data():
+    return pd.read_csv(DATA_PATH)
 
-CANDIDATE_PATHS = [
-    'ch2_knn.csv',
-    'data/ch2_knn.csv',
-    '../data/ch2_knn.csv',
-    '/.agents/workspace/ch2_knn.csv'
-]
+try:
+    df = load_data()
+    st.success("데이터셋 'ch2_knn.csv' 로드 완료!")
+except Exception as e:
+    st.error(f"데이터 로드 실패: {e}")
+    st.stop()
 
-df = None
-for path in CANDIDATE_PATHS:
-    if os.path.exists(path):
-        df = pd.read_csv(path)
-        print(f"✓ 파일 로드 완료: '{path}'")
-        break
+# 탭 구성
+tab1, tab2, tab3 = st.tabs(["📊 데이터 분석", "📈 모델 평가", "🔮 신규 지원자 예측"])
 
-if df is None:
-    print("▶ 로컬 디렉토리에서 'ch2_knn.csv'를 찾을 수 없습니다. Colab 환경인지 확인합니다.")
-    try:
-        from google.colab import files
-        uploaded = files.upload()
-        filename = list(uploaded.keys())[0]
-        df = pd.read_csv(io.BytesIO(uploaded[filename]))
-        print(f"✓ Colab 파일 업로드 완료: {filename}")
-    except ImportError:
-        raise FileNotFoundError(
-            "'ch2_knn.csv' 파일을 작업 디렉토리 또는 'data/' 폴더에 배치해주세요."
-        )
+# 전처리 & 모델 학습 캐싱
+@st.cache_resource
+def train_model(data):
+    X = data.drop(columns=['EmpID', 'AftEval'])
+    y = data['AftEval']
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    
+    pipeline = Pipeline([
+        ('scaler', StandardScaler()),
+        ('knn', KNeighborsClassifier())
+    ])
+    param_grid = {
+        'knn__n_neighbors': [3, 5, 7, 9, 11],
+        'knn__weights': ['uniform', 'distance'],
+        'knn__metric': ['euclidean', 'manhattan']
+    }
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    grid = GridSearchCV(pipeline, param_grid, cv=cv, scoring='accuracy', n_jobs=-1)
+    grid.fit(X_train, y_train)
+    return grid.best_estimator_, X_test, y_test, grid.best_params_
 
-# 데이터 기본 정보 출력
-print("\n[DataFrame 정보]")
-df.info()
-
-print("\n[수치형 변수 기술통계량]")
-print(df.describe().round(2))
-
-# 타깃 레이블(AftEval) 클래스 분포 확인
-counts = df['AftEval'].value_counts()
-ratios = df['AftEval'].value_counts(normalize=True) * 100
-target_dist = pd.DataFrame({
-    '인원수(명)': counts,
-    '비율(%)': ratios.round(2),
-    'HR 의미': ['저성과자 (0: 일반/관리대상)', '고성과자 (1: 우수인재)']
-})
-print("\n[타깃 레이블(AftEval) 분포 및 비율]")
-print(target_dist)
-
-
-# ==============================================================================
-# 2. 데이터 전처리 및 Train / Test 분할 (Data Leakage 방지)
-# ==============================================================================
-print("\n" + "=" * 75)
-print("2. 데이터 전처리 및 학습/테스트 분할")
-print("=" * 75)
-
-# 식별자(EmpID) 및 타깃 변수(AftEval) 분리
-X = df.drop(columns=['EmpID', 'AftEval'])
-y = df['AftEval']
-
-print(f"독립변수(X) 목록 : {list(X.columns)}")
-print(f"특성 행렬 크기   : {X.shape}, 타깃 벡터 크기: {y.shape}")
-
-# Stratified 80:20 분할
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=0.2,
-    stratify=y,
-    random_state=42
-)
-
-print(f"✓ 훈련 데이터셋(Train Set) 크기 : {X_train.shape[0]}명 ({X_train.shape[0]/len(df)*100:.1f}%)")
-print(f"✓ 테스트 데이터셋(Test Set) 크기: {X_test.shape[0]}명 ({X_test.shape[0]/len(df)*100:.1f}%)")
-print(f"  - 훈련 데이터 내 고성과자 비율 : {y_train.mean()*100:.2f}%")
-print(f"  - 테스트 데이터 내 고성과자 비율: {y_test.mean()*100:.2f}%")
-
-
-# ==============================================================================
-# 3. Pipeline 구축 및 하이퍼파라미터 튜닝 (GridSearchCV)
-# ==============================================================================
-print("\n" + "=" * 75)
-print("3. Pipeline 구축 및 5-Fold StratifiedKFold 하이퍼파라미터 튜닝")
-print("=" * 75)
-
-pipeline = Pipeline([
-    ('scaler', StandardScaler()),
-    ('knn', KNeighborsClassifier())
-])
-
-param_grid = {
-    'knn__n_neighbors': [3, 5, 7, 9, 11, 13, 15],
-    'knn__weights': ['uniform', 'distance'],
-    'knn__metric': ['euclidean', 'manhattan']
-}
-
-stratified_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-grid_search = GridSearchCV(
-    estimator=pipeline,
-    param_grid=param_grid,
-    cv=stratified_cv,
-    scoring='accuracy',
-    n_jobs=-1,
-    verbose=0
-)
-
-print("GridSearchCV 최적 파라미터 조합 탐색 중...")
-grid_search.fit(X_train, y_train)
-
-best_params = grid_search.best_params_
-best_cv_score = grid_search.best_score_
-best_model = grid_search.best_estimator_
-
-print("\n" + "-" * 50)
-print("★ GridSearchCV 하이퍼파라미터 최적 결과 ★")
-print("• 최적 하이퍼파라미터 조합:")
-for k, v in best_params.items():
-    print(f"    - {k.replace('knn__', '')} : {v}")
-print(f"• 최고 5-Fold 교차검증 정확도 (Best CV Accuracy): {best_cv_score:.4f} ({best_cv_score*100:.2f}%)")
-print("-" * 50)
-
-
-# ==============================================================================
-# 4. 테스트 데이터셋 최종 모델 평가 및 HR 오차 분석 (Confusion Matrix & ROC)
-# ==============================================================================
-print("\n" + "=" * 75)
-print("4. 테스트 데이터셋 모델 평가 및 HR 오차(Risk) 분석")
-print("=" * 75)
-
+best_model, X_test, y_test, best_params = train_model(df)
 y_pred = best_model.predict(X_test)
 y_pred_proba = best_model.predict_proba(X_test)[:, 1]
 
-acc = accuracy_score(y_test, y_pred)
-prec = precision_score(y_test, y_pred)
-rec = recall_score(y_test, y_pred)
-f1 = f1_score(y_test, y_pred)
-roc_auc = roc_auc_score(y_test, y_pred_proba)
+# Tab 1: 데이터 개요
+with tab1:
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("데이터 미리보기")
+        st.dataframe(df.head(10))
+    with col2:
+        st.subheader("타깃 레이블(AftEval) 분포")
+        dist = df['AftEval'].value_counts()
+        st.bar_chart(dist)
 
-print(f"▶ Accuracy  (정확도)       : {acc:.4f} ({acc*100:.2f}%)")
-print(f"▶ Precision (정밀도/적중률) : {prec:.4f} ({prec*100:.2f}%)")
-print(f"▶ Recall    (재현율/발굴률) : {rec:.4f} ({rec*100:.2f}%)")
-print(f"▶ F1-Score  (조화평균)     : {f1:.4f}")
-print(f"▶ ROC-AUC   (변별력 지수)  : {roc_auc:.4f}")
-
-print("\n[상세 Classification Report]")
-print(classification_report(y_test, y_pred, target_names=['저성과자(0)', '고성과자(1)']))
-
-cm = confusion_matrix(y_test, y_pred)
-tn, fp, fn, tp = cm.ravel()
-
-print("=" * 75)
-print("★ 피플 애널리틱스 채용 의사결정 오차 분석 (HR Risk Analysis) ★")
-print("=" * 75)
-print(f"• TN (True Negative  - 정상 탈락) : {tn}명")
-print("  -> 저성과 예상자를 올바르게 미채용 (조직 적합성 관리 성공)")
-print(f"• FP (False Positive - 오류 선발 / 1종 오류) : {fp}명")
-print("  -> [채용 실패 비용] 저성과자를 고성과자로 잘못 채용 (조기 퇴사/교육 비용 리스크)")
-print(f"• FN (False Negative - 오류 탈락 / 2종 오류) : {fn}명")
-print("  -> [인재 유실 손실] 실제 우수인재를 전형에서 탈락시킴 (핵심인재 기회비용)")
-print(f"• TP (True Positive  - 적격 선발) : {tp}명")
-print("  -> 실제 고성과자를 성공적으로 판별하여 최종 선발")
-print("=" * 75)
-
-# 시각화
-fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-
-cm_annotations = np.array([
-    [f"TN\n{tn}명\n(정상 탈락)", f"FP\n{fp}명\n(오류 선발)"],
-    [f"FN\n{fn}명\n(오류 탈락)", f"TP\n{tp}명\n(적격 선발)"]
-])
-sns.heatmap(
-    cm, annot=cm_annotations, fmt='', cmap='Blues', cbar=False, ax=axes[0],
-    annot_kws={"size": 13, "weight": "bold"},
-    xticklabels=['Pred: Low (0)', 'Pred: High (1)'],
-    yticklabels=['Actual: Low (0)', 'Actual: High (1)']
-)
-axes[0].set_title('Confusion Matrix (HR Decision Matrix)', fontsize=15, weight='bold', pad=12)
-axes[0].set_xlabel('Predicted Performance Class', fontsize=12)
-axes[0].set_ylabel('Actual Performance Class (1 Year Later)', fontsize=12)
-
-fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
-axes[1].plot(fpr, tpr, color='#1f77b4', lw=2.5, label=f'kNN Model (AUC = {roc_auc:.3f})')
-axes[1].plot([0, 1], [0, 1], color='#d62728', lw=1.5, linestyle='--', label='Random Chance (AUC = 0.50)')
-axes[1].fill_between(fpr, tpr, step='post', alpha=0.15, color='#1f77b4')
-axes[1].set_xlim([-0.02, 1.02])
-axes[1].set_ylim([-0.02, 1.05])
-axes[1].set_xlabel('False Positive Rate (FPR: 오류 선발 비율)', fontsize=12)
-axes[1].set_ylabel('True Positive Rate (TPR / Recall: 인재 발굴 비율)', fontsize=12)
-axes[1].set_title(f'ROC Curve (AUC = {roc_auc:.3f})', fontsize=15, weight='bold', pad=12)
-axes[1].legend(loc='lower right', fontsize=11, frameon=True)
-axes[1].grid(True, linestyle=':', alpha=0.6)
-
-plt.tight_layout()
-plt.show()
-
-
-# ==============================================================================
-# 5. 신규 지원자 성과 예측 테스트 (Inference Simulation)
-# ==============================================================================
-print("\n" + "=" * 75)
-print("5. 신규 입사 지원자 2인 성과 예측 테스트")
-print("=" * 75)
-
-candidates_df = pd.DataFrame([
-    {
-        '지원자 구분': '신규 지원자 A (직무역량 탁월형)',
-        'Gender': 1,
-        'PreviousExperience': 2,
-        'InterviewScore': 88,
-        'SkillScore': 94,
-        'PersonalityScore': 85
-    },
-    {
-        '지원자 구분': '신규 지원자 B (기초역량 보통형)',
-        'Gender': 0,
-        'PreviousExperience': 0,
-        'InterviewScore': 52,
-        'SkillScore': 48,
-        'PersonalityScore': 68
-    }
-])
-
-feature_cols = ['Gender', 'PreviousExperience', 'InterviewScore', 'SkillScore', 'PersonalityScore']
-X_candidates = candidates_df[feature_cols]
-
-preds = best_model.predict(X_candidates)
-probs = best_model.predict_proba(X_candidates)
-
-print("신규 지원자 2인에 대한 kNN 채용 예측 시뮬레이션 결과:")
-print("-" * 75)
-for idx, row in candidates_df.iterrows():
-    pred_cls = preds[idx]
-    prob_low = probs[idx][0] * 100
-    prob_high = probs[idx][1] * 100
-    label_text = "고성과자 (채용 추천)" if pred_cls == 1 else "저성과자 (채용 신중 검토)"
+# Tab 2: 모델 평가 지표 & 차트
+with tab2:
+    st.subheader(f"최적 파라미터: {best_params}")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("정확도 (Accuracy)", f"{accuracy_score(y_test, y_pred)*100:.1f}%")
+    m2.metric("F1-Score", f"{f1_score(y_test, y_pred):.3f}")
+    m3.metric("ROC-AUC", f"{roc_auc_score(y_test, y_pred_proba):.3f}")
     
-    print(f"▶ [{row['지원자 구분']}]")
-    print(f"  • 전형 스펙 : 경력 {row['PreviousExperience']}년 | 면접 {row['InterviewScore']}점 | 코딩 {row['SkillScore']}점 | 인성 {row['PersonalityScore']}점")
-    print(f"  • 모델 판정 : AftEval = {pred_cls} ({label_text})")
-    print(f"  • 세부 확률 : [고성과자 확률: {prob_high:5.2f}%] vs [저성과자 확률: {prob_low:5.2f}%]")
-    if pred_cls == 1:
-        print("  • HR 추천의견: 핵심 역량인 코딩 및 면접 점수가 우수하여 입사 1년 후 고성과를 낼 확률이 높음.")
-    else:
-        print("  • HR 추천의견: 전형 점수 전반이 기준점 부근으로 채용 시 조기 전력화 및 멘토링 프로그램 연계 필요.")
-    print("-" * 75)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    cm = confusion_matrix(y_test, y_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[0])
+    axes[0].set_title("Confusion Matrix")
+    
+    fpr, tpr, _ = roc_curve(y_test, y_pred_proba)
+    axes[1].plot(fpr, tpr, label='kNN')
+    axes[1].plot([0, 1], [0, 1], 'r--')
+    axes[1].set_title("ROC Curve")
+    st.pyplot(fig)
+
+# Tab 3: 신규 지원자 시뮬레이션
+with tab3:
+    st.subheader("신규 지원자 정보 입력")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    gender = c1.selectbox("성별(0:여, 1:남)", [0, 1])
+    exp = c2.slider("경력(년)", 0, 10, 2)
+    interview = c3.slider("면접 점수", 0, 100, 85)
+    skill = c4.slider("코딩테스트 점수", 0, 100, 90)
+    pers = c5.slider("인성검사 점수", 0, 100, 80)
+    
+    input_data = pd.DataFrame([[gender, exp, interview, skill, pers]], 
+                              columns=['Gender', 'PreviousExperience', 'InterviewScore', 'SkillScore', 'PersonalityScore'])
+    
+    if st.button("성과 예측 실행"):
+        pred = best_model.predict(input_data)[0]
+        prob = best_model.predict_proba(input_data)[0][1] * 100
+        
+        if pred == 1:
+            st.success(f"🎯 **고성과자 예측** (우수인재 확률: {prob:.1f}%) - 채용 추천")
+        else:
+            st.warning(f"⚠️ **일반/관리대상 예측** (우수인재 확률: {prob:.1f}%) - 채용 신중 검토")
